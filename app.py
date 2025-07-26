@@ -24,15 +24,16 @@ def fetch_trending_movies():
             poster = (
                 "https://image.tmdb.org/t/p/w185" + movie['poster_path']
                 if movie.get('poster_path') else "https://via.placeholder.com/185x278.png?text=No+Image"
-            ) 
+            )
             movies_list.append({
                 'title': movie['title'],
                 'poster': poster,
-                'rating': movie('vote_average','N/A'),
-                'year': movie.get('release_date','')[:4],
+                'rating': movie.get('vote_average', 'N/A'),  # <-- fix here
+                'year': movie.get('release_date', '')[:4],
             })
         return movies_list
-    except Exception:
+    except Exception as e:
+        st.warning(f"Error fetching trending movies: {e}")
         return []
     
 #---UI---page
