@@ -79,7 +79,7 @@ else:
 movies = pd.read_csv("top10K-TMDB-movies.csv")
 
 # Preprocess genres and year
-movies['genre'] = movies['genre'].fillna('').apply(lambda x: '|'.join([g['name'] for g in eval(x)]) if x.startswith('[') else x)
+movies['genre'] = movies['genre'].fillna('').str.replace(',', '|')
 movies['year'] = pd.to_datetime(movies['release_date'], errors='coerce').dt.year
 movies['tags'] = movies['overview'].fillna('')
 
@@ -93,7 +93,7 @@ selected_year = st.sidebar.selectbox("Filter by Year", ["Any"] + [str(int(y)) fo
 @st.cache_resource
 def get_similarity_and_vectors(data):
     cv = CountVectorizer(max_features=5000, stop_words='english')
-    vectors = cv.fit_transform(data['tags']).toarray()
+    vectors = cv.fit_transform(data['tags']).toarray() # type: ignore
     return cosine_similarity(vectors)
 
 similarity = get_similarity_and_vectors(movies)
@@ -130,6 +130,12 @@ def fetch_trailer(movie_id):
 user_reviews = {}
 
 def recommend(movie, genres=None, year=None):
+    try:
+        movie = movie.lower()
+        filtered_movies = movies.copy()
+    except Exception as e:
+        st.error(f"Error generating recommendations: {e}")
+        return [], [], [], [], [], []
     movie = movie.lower()
     filtered_movies = movies.copy()
     if genres:
@@ -156,7 +162,6 @@ def recommend(movie, genres=None, year=None):
     return titles, posters, tags, ratings, years_, trailers
 
 # --- UI ---
-st.set_page_config(page_title="MovieMate", layout="wide")
 st.title("🎬 MovieMate – AI Movie Recommender")
 
 movie_name = st.text_input("Search your favorite movie", "")
