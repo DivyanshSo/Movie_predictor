@@ -1,0 +1,10 @@
+credentials:
+  usernames:
+    testuser:
+      email: test@example.com
+      name: Test User
+      password: $2b$12$tW.Zom8WbsY7DIL3D4aBRuzPFE5AhFxozZHNV0uRfiHU80GS1wtr2 # Password is: password123
+cookie:
+  expiry_days: 30
+  key: random_signature_key
+  name: movie_auth_cookie

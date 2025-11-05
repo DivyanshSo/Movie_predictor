@@ -1,0 +1,13 @@
+credentials:
+  usernames:
+    divyansh:
+      name: Divyansh
+      password: $2b$12$PFhnJyfEDMktDW0jZEuZNOKojUiYPWn5ok6JDkm4ys3BP0IdDBFFC
+    testuser:
+      name: Test User
+      password: $2b$12$UsPLS0eKja05dYsIruud8eBRQIU1J84HAstyvtRZYiRt5Qyje5IGe
+
+cookie:
+  expiry_days: 30
+  name: movie_app_cookie
+  key: abc123
