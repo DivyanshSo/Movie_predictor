@@ -54,7 +54,7 @@ try:
     st.title("🎬 MovieMate – AI Movie Recommender")
     
     # Create the login form in the main area
-    name, authentication_status, username = authenticator.login(form_name='Login', location='main')
+    name, authentication_status, username = authenticator.login('Login', 'main')
     
     # Handle authentication status
     if authentication_status is False:
