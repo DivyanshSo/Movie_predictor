@@ -5,9 +5,6 @@ requests
 streamlit-authenticator==0.2.2
 # --- IGNORE ---
 gspread
-gspread
 google-auth
 google-auth-oauthlib
 - --- IGNORE ---
-gspread
-google-auth
