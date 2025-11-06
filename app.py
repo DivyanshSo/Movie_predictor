@@ -54,8 +54,7 @@ try:
     st.title("🎬 MovieMate – AI Movie Recommender")
     
     # Create the login form in the main area
-    # Use explicit location keyword to match streamlit-authenticator expectations
-    name, authentication_status, username = authenticator.login('Login', location='main')
+    name, authentication_status, username = authenticator.login('Login', 'main')
     
     # Handle authentication status
     if authentication_status is False:
