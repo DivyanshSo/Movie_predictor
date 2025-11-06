@@ -20,32 +20,41 @@ st.set_page_config(page_title="MovieMate", layout="wide")
 
 # Initialize authentication
 try:
-    # Load configuration
-    config_path = Path("config.yaml")
+    # Load configuration using absolute path
+    config_path = Path(__file__).parent / "config.yaml"
     if not config_path.exists():
-        st.error("Configuration file not found. Please check your setup.")
+        st.error(f"Configuration file not found at {config_path}. Please check your setup.")
         st.stop()
 
-    with config_path.open('r') as file:
-        config = yaml.safe_load(file)
+    try:
+        with config_path.open('r', encoding='utf-8') as file:
+            config = yaml.safe_load(file)
+    except Exception as e:
+        st.error(f"Error reading configuration file: {str(e)}")
+        st.stop()
 
     if not isinstance(config, dict):
         st.error("Invalid configuration format")
         st.stop()
 
     # Initialize authenticator
-    authenticator = stauth.Authenticate(
-        credentials=config['credentials'],
-        cookie_name=config['cookie']['name'],
-        key=config['cookie']['key'],
-        cookie_expiry_days=config['cookie']['expiry_days']
-    )
+    try:
+        authenticator = stauth.Authenticate(
+            credentials=config['credentials'],
+            cookie_name=config['cookie']['name'],
+            key=config['cookie']['key'],
+            cookie_expiry_days=config['cookie']['expiry_days']
+        )
+    except Exception as e:
+        st.error(f"Error initializing authentication: {str(e)}")
+        logging.error(f"Authentication initialization error: {str(e)}")
+        st.stop()
 
     # Display title (after authenticator initialization, before login)
     st.title("🎬 MovieMate – AI Movie Recommender")
     
     # Create the login form in the main area
-    name, authentication_status, username = authenticator.login('Login', 'main')
+    name, authentication_status, username = authenticator.login(form_name='Login', location='main')
     
     # Handle authentication status
     if authentication_status is False:
