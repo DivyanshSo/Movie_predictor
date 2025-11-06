@@ -3,7 +3,5 @@ pandas
 scikit-learn
 requests
 streamlit-authenticator==0.2.2
-# --- IGNORE ---
-gspread
-google-auth
-- --- IGNORE ---
+gspread==5.12.0
+google-auth==2.22.0
