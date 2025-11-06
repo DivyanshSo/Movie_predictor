@@ -10,6 +10,16 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import streamlit_authenticator as stauth
 
+import gspread
+from google.oauth2.service_account import Credentials
+
+scope = ["https://www.googleapis.com/auth/spreadsheets"]
+creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+client = gspread.authorize(creds)
+
+SHEET = client.open_by_url("https://docs.google.com/spreadsheets/d/1E1WZ5egjv066mDpwXe4EVOtRLq-gtEEjk1E_dTmW0cs/edit?usp=sharing").sheet1
+
+
 # ---------- App Config ----------
 st.set_page_config(page_title="MovieMate", layout="wide")
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +38,10 @@ except Exception as e:
     st.error(f"Invalid config.yaml: {e}")
     st.stop()
 
+def register_user(username, name, email, password_hash):
+    SHEET.append_row([username, name, email, password_hash])
+
+
 # ---------- Auth: init & login (streamlit-authenticator v0.2.2) ----------
 try:
     authenticator = stauth.Authenticate(
@@ -41,6 +55,20 @@ except Exception as e:
     st.stop()
 
 st.title("🎬 MovieMate — AI Movie Recommender")
+if st.toggle("New user? Create an account"):
+    username = st.text_input("Choose a Username")
+    name = st.text_input("Full Name")
+    email = st.text_input("Email")
+    password = st.text_input("Choose Password", type="password")
+
+    if st.button("Sign Up"):
+        if username and password:
+            hashed_password = stauth.Hasher([password]).generate()[0]
+            register_user(username, name, email, hashed_password)
+            st.success("Account created ✅ Now login below.")
+        else:
+            st.error("Please fill all fields")
+
 
 name, auth_status, username = authenticator.login("Login", "main")
 
