@@ -1,278 +1,256 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
+import requests, yaml, logging, os
+from pathlib import Path
+from typing import List, Tuple, Optional
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import streamlit_authenticator as stauth
-import yaml
-from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
-import logging
 
-# Set up logging
+# ---------- App Config ----------
+st.set_page_config(page_title="MovieMate", layout="wide")
 logging.basicConfig(level=logging.INFO)
 
-# Configure page and imports
-st.set_page_config(page_title="MovieMate", layout="wide")
-
-# Initialize authentication
-try:
-    # Load configuration using absolute path
-    config_path = Path(__file__).parent / "config.yaml"
-    if not config_path.exists():
-        st.error(f"Configuration file not found at {config_path}. Please check your setup.")
-        st.stop()
-
-    try:
-        with config_path.open('r', encoding='utf-8') as file:
-            config = yaml.safe_load(file)
-    except Exception as e:
-        st.error(f"Error reading configuration file: {str(e)}")
-        st.stop()
-
-    if not isinstance(config, dict):
-        st.error("Invalid configuration format")
-        st.stop()
-
-    # Initialize authenticator
-    try:
-        authenticator = stauth.Authenticate(
-            credentials=config['credentials'],
-            cookie_name=config['cookie']['name'],
-            key=config['cookie']['key'],
-            cookie_expiry_days=config['cookie']['expiry_days']
-        )
-    except Exception as e:
-        st.error(f"Error initializing authentication: {str(e)}")
-        logging.error(f"Authentication initialization error: {str(e)}")
-        st.stop()
-
-    # Display title (after authenticator initialization, before login)
-    st.title("🎬 MovieMate – AI Movie Recommender")
-    
-    # Create the login form in the main area
-    name, authentication_status, username = authenticator.login(form_name='Login', location='main')
-    
-    # Handle authentication status
-    if authentication_status is False:
-        st.error('❌ Username/password is incorrect')
-        st.stop()
-    elif authentication_status is None:
-        st.warning('⚠️ Please enter your username and password')
-        st.stop()
-    elif authentication_status:
-        # Show success message in sidebar
-        st.sidebar.success(f"✅ Logged in as {name}")
-
-        # Add logout button to sidebar
-        authenticator.logout(button_name='Logout', location='sidebar')
-
-        # Initialize user-specific session state
-        WATCHLIST_KEY = f"watchlist_{username}"
-        if WATCHLIST_KEY not in st.session_state:
-            st.session_state[WATCHLIST_KEY] = []
-        watchlist = st.session_state[WATCHLIST_KEY]
-    else:
-        st.error("Something went wrong with authentication")
-        st.stop()
-
-except Exception as e:
-    logging.error(f"Authentication error: {str(e)}")
-    st.error('Authentication system error. Please try again.')
+# ---------- Auth: load config ----------
+config_path = Path(__file__).parent / "config.yaml"
+if not config_path.exists():
+    st.error(f"Config not found at {config_path}")
     st.stop()
 
+try:
+    with config_path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    assert isinstance(config, dict) and "credentials" in config and "cookie" in config
+except Exception as e:
+    st.error(f"Invalid config.yaml: {e}")
+    st.stop()
 
-# ---- API Key ----
-TMDB_API_KEY = st.secrets["tmdb"]["api_key"]
+# ---------- Auth: init & login (streamlit-authenticator v0.2.2) ----------
+try:
+    authenticator = stauth.Authenticate(
+        credentials=config["credentials"],
+        cookie_name=config["cookie"]["name"],
+        key=config["cookie"]["key"],
+        cookie_expiry_days=config["cookie"]["expiry_days"],
+    )
+except Exception as e:
+    st.error(f"Auth init error: {e}")
+    st.stop()
 
+st.title("🎬 MovieMate — AI Movie Recommender")
 
+name, auth_status, username = authenticator.login("Login", "main")
+
+if auth_status is False:
+    st.error("❌ Incorrect username or password")
+    st.stop()
+elif auth_status is None:
+    st.warning("⚠️ Please enter your username and password")
+    st.stop()
+
+# Authenticated UI
+st.sidebar.success(f"✅ Logged in as {name}")
+authenticator.logout("Logout", "sidebar")
+
+# ---------- Secrets / Keys ----------
+try:
+    TMDB_API_KEY = st.secrets["tmdb"]["api_key"]
+except Exception:
+    st.error("Missing TMDB API key in .streamlit/secrets.toml (tmdb.api_key)")
+    st.stop()
+
+# ---------- Cache directory (local, fast) ----------
+CACHE_DIR = Path("cachr")
+CACHE_DIR.mkdir(exist_ok=True)
+
+# ---------- HTTP session ----------
 def create_requests_session():
-    """Create a requests session with retry logic"""
-    session = requests.Session()
+    s = requests.Session()
     retries = Retry(
         total=5,
-        backoff_factor=0.1,
+        backoff_factor=0.2,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-        raise_on_status=True
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=True,
     )
-    session.mount('https://', HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10))
-    return session
+    s.mount("https://", HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10))
+    return s
 
+# ---------- TMDB helpers with local cache ----------
+def fetch_poster(movie_id: int) -> str:
+    cache_file = CACHE_DIR / f"poster_{movie_id}.txt"
+    if cache_file.exists():
+        return cache_file.read_text()
 
-@st.cache_data(show_spinner=False, ttl=3600)  # Cache for 1 hour
-def fetch_trending_movies():
-    """Fetch trending movies from TMDB API with enhanced error handling"""
-    url = f"https://api.themoviedb.org/3/trending/movie/week?api_key={TMDB_API_KEY}"
-    movies_list = []
-    
+    session = create_requests_session()
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}"
     try:
-        session = create_requests_session()
-        r = session.get(url, timeout=(5,30))
-        r.raise_for_status()
-        trending = r.json().get("results", [])[:5]
-        
-        for m in trending:
-            # Get poster with fallback
-            poster_url = "https://via.placeholder.com/185x278.png?text=Movie+Poster+Not+Available"
-            try:
-                if m.get('poster_path'):
-                    temp_poster_url = "https://image.tmdb.org/t/p/w185" + m['poster_path']
-                    # Verify poster accessibility
-                    poster_response = session.get(temp_poster_url, timeout=(3,10))
-                    poster_response.raise_for_status()
-                    poster_url = temp_poster_url
-            except Exception as e:
-                logging.warning(f"Could not fetch poster for movie {m.get('title', 'Unknown')}: {str(e)}")
-            
-            # Get trailer
-            trailer_url = None
-            try:
-                if m.get('id'):
-                    trailer_url = fetch_trailer(m['id'])
-            except Exception as e:
-                logging.warning(f"Could not fetch trailer for movie {m.get('title', 'Unknown')}: {str(e)}")
-            
-            # Add movie to list
-            movies_list.append({
+        r = session.get(url, timeout=(5, 20)); r.raise_for_status()
+        data = r.json()
+        if data.get("poster_path"):
+            poster_url = "https://image.tmdb.org/t/p/w185" + data["poster_path"]
+            cache_file.write_text(poster_url)
+            return poster_url
+    except Exception as e:
+        logging.warning(f"Poster fetch failed for {movie_id}: {e}")
+
+    fallback = "https://via.placeholder.com/185x278.png?text=No+Poster"
+    cache_file.write_text(fallback)
+    return fallback
+
+def fetch_trailer(movie_id: int) -> Optional[str]:
+    cache_file = CACHE_DIR / f"trailer_{movie_id}.txt"
+    if cache_file.exists():
+        saved = cache_file.read_text()
+        return saved if saved != "None" else None
+
+    session = create_requests_session()
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}/videos?api_key={TMDB_API_KEY}"
+    try:
+        r = session.get(url, timeout=(5, 20)); r.raise_for_status()
+        results = r.json().get("results", [])
+
+        # Prefer any Trailer on YouTube
+        for v in results:
+            if v.get("site") == "YouTube" and v.get("type") == "Trailer":
+                trailer_url = f"https://www.youtube.com/watch?v={v['key']}"
+                cache_file.write_text(trailer_url)
+                return trailer_url
+    except Exception as e:
+        logging.warning(f"Trailer fetch failed for {movie_id}: {e}")
+
+    cache_file.write_text("None")
+    return None
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_trending_movies() -> list:
+    session = create_requests_session()
+    url = f"https://api.themoviedb.org/3/trending/movie/week?api_key={TMDB_API_KEY}"
+    out = []
+    try:
+        r = session.get(url, timeout=(5, 20)); r.raise_for_status()
+        for m in r.json().get("results", [])[:5]:
+            poster = "https://via.placeholder.com/185x278.png?text=No+Poster"
+            if m.get("poster_path"):
+                poster = "https://image.tmdb.org/t/p/w185" + m["poster_path"]
+            trailer = fetch_trailer(m.get("id")) if m.get("id") else None
+            out.append({
+                "id": m.get("id"),
                 "title": m.get("title") or "Untitled",
-                "poster": poster_url,
-                "rating": round(float(m.get("vote_average", 0)), 1),
+                "poster": poster,
+                "rating": float(m.get("vote_average") or 0.0),
                 "year": (m.get("release_date") or "")[:4],
-                "trailer": trailer_url
+                "trailer": trailer,
             })
-        return movies_list
-    except:
-        return []
+    except Exception as e:
+        logging.warning(f"Trending fetch failed: {e}")
+    return out
 
-
-# ---- Theme Settings ----
-# Theme selector in sidebar with better styling
+# ---------- Theme toggle ----------
 with st.sidebar:
     st.markdown("### 🎨 Appearance")
-    theme = st.radio(
-        "Choose Theme",
-        ["🌞 Light", "🌙 Dark"],
-        key="theme_selector"
-    )
+    theme = st.radio("Choose Theme", ["🌞 Light", "🌙 Dark"], key="theme_selector")
 
-# Apply theme styles
+# Minimal, clean card UI styles (auto theme)
 if theme == "🌙 Dark":
-    # Dark theme
     st.markdown("""
-        <style>
-        .stApp {
-            background-color: #1E1E1E;
-            color: #FFFFFF;
-        }
-        .stButton button {
-            background-color: #4A4A4A;
-            color: #FFFFFF;
-            border: 1px solid #666666;
-        }
-        .stTextInput input {
-            background-color: #2D2D2D;
-            color: #FFFFFF;
-            border: 1px solid #666666;
-        }
-        .stSelectbox select {
-            background-color: #2D2D2D;
-            color: #FFFFFF;
-        }
-        .stMarkdown {
-            color: #FFFFFF;
-        }
-        .css-145kmo2 {
-            color: #FFFFFF;
-        }
-        .css-1vq4p4l {
-            padding: 1em;
-            border-radius: 10px;
-            background-color: #2D2D2D;
-            margin-bottom: 1em;
-        }
-        h1, h2, h3 {
-            color: #FFFFFF !important;
-        }
-        .stRadio > div {
-            background-color: #2D2D2D;
-            padding: 10px;
-            border-radius: 5px;
-        }
-        </style>
+    <style>
+    .stApp { background:#0f1115; color:#e6e6e6; }
+    .mm-card { padding:1rem; border-radius:14px; background:#151821; box-shadow:0 8px 16px rgba(0,0,0,.25); }
+    .mm-btn { background:#1f2430; color:#e6e6e6; border:1px solid #2c3240; border-radius:10px; padding:.5rem 1rem; }
+    h1,h2,h3 { color:#fff !important; }
+    </style>
     """, unsafe_allow_html=True)
 else:
-    # Light theme with better contrast
     st.markdown("""
-        <style>
-        .stApp {
-            background-color: #FFFFFF;
-            color: #000000;
-        }
-        .stButton button {
-            background-color: #F0F2F6;
-            color: #000000;
-            border: 1px solid #E0E0E0;
-        }
-        .stTextInput input {
-            background-color: #FFFFFF;
-            color: #000000;
-            border: 1px solid #E0E0E0;
-        }
-        .stSelectbox select {
-            background-color: #FFFFFF;
-            color: #000000;
-        }
-        .stMarkdown {
-            color: #000000;
-        }
-        .css-145kmo2 {
-            color: #000000;
-        }
-        .css-1vq4p4l {
-            padding: 1em;
-            border-radius: 10px;
-            background-color: #F8F9FA;
-            margin-bottom: 1em;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        h1, h2, h3 {
-            color: #000000 !important;
-        }
-        .stRadio > div {
-            background-color: #F8F9FA;
-            padding: 10px;
-            border-radius: 5px;
-        }
-        </style>
+    <style>
+    .stApp { background:#f7f8fb; color:#1d1d1f; }
+    .mm-card { padding:1rem; border-radius:14px; background:#ffffff; box-shadow:0 8px 16px rgba(17,17,26,.08); }
+    .mm-btn { background:#f1f3f7; color:#1d1d1f; border:1px solid #e6e8ef; border-radius:10px; padding:.5rem 1rem; }
+    h1,h2,h3 { color:#111 !important; }
+    </style>
     """, unsafe_allow_html=True)
 
-# Initialize watchlist
+# ---------- Per-user watchlist ----------
 WATCHLIST_KEY = f"watchlist_{username}"
 if WATCHLIST_KEY not in st.session_state:
     st.session_state[WATCHLIST_KEY] = []
 watchlist = st.session_state[WATCHLIST_KEY]
 
-# ---- Load Movie Dataset ----
-movies = pd.read_csv("top10K-TMDB-movies.csv")
-movies['genre'] = movies['genre'].fillna('').str.replace(',', '|')
-movies['year'] = pd.to_datetime(movies['release_date'], errors='coerce').dt.year
-movies['tags'] = movies['overview'].fillna('')
-movies['title_lc'] = movies['title'].str.lower()
+# ---------- Data ----------
+DATA_PATH = Path(__file__).parent / "top10K-TMDB-movies.csv"
+if not DATA_PATH.exists():
+    st.error(f"Dataset not found: {DATA_PATH.name}")
+    st.stop()
 
+@st.cache_data(show_spinner=True)
+def load_movies(csv_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    df["genre"] = df["genre"].fillna("").astype(str).str.replace(",", "|")
+    df["year"] = pd.to_datetime(df["release_date"], errors="coerce").dt.year
+    df["tags"] = df["overview"].fillna("")
+    df["title_lc"] = df["title"].fillna("").str.lower()
+    return df
 
-# ---- Sidebar Filters ----
-all_genres = sorted({g for row in movies['genre'] for g in row.split('|') if g})
+movies = load_movies(DATA_PATH)
+
+@st.cache_resource(show_spinner=True)
+def build_similarity(df: pd.DataFrame) -> np.ndarray:
+    cv = CountVectorizer(max_features=5000, stop_words="english")
+    vectors = cv.fit_transform(df["tags"])
+    return cosine_similarity(vectors)
+
+similarity = build_similarity(movies)
+
+def recommend(
+    movie: str,
+    genres: Optional[List[str]] = None,
+    year: Optional[str] = None,
+    k: int = 3
+) -> Tuple[List[str], List[str], List[str], List[float], List[int], List[Optional[str]], List[int]]:
+    title = (movie or "").strip().lower()
+    if title not in movies["title_lc"].values:
+        return [], [], [], [], [], [], []
+    idx = movies.index[movies["title_lc"] == title][0]
+    scores = similarity[idx]
+    ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[1:100]
+
+    final_rows = []
+    for j, _ in ranked:
+        row = movies.iloc[j]
+        if genres and not any(g in row["genre"].split("|") for g in genres):
+            continue
+        if year and year != "Any":
+            try:
+                if int(row["year"]) != int(year):
+                    continue
+            except Exception:
+                continue
+        final_rows.append(row)
+        if len(final_rows) >= k:
+            break
+
+    if not final_rows:
+        return [], [], [], [], [], [], []
+
+    titles = [r.title for r in final_rows]
+    ids = [int(r.id) for r in final_rows]
+    posters = [fetch_poster(mid) for mid in ids]
+    tags = [r.tags for r in final_rows]
+    ratings = [float(r.vote_average) if pd.notnull(r.vote_average) else 0.0 for r in final_rows]
+    years_ = [int(r.year) if pd.notnull(r.year) else 0 for r in final_rows]
+    trailers = [fetch_trailer(mid) for mid in ids]
+    return titles, posters, tags, ratings, years_, trailers, ids
+
+# ---------- Sidebar: Filters + Watchlist ----------
+all_genres = sorted({g for row in movies["genre"] for g in row.split("|") if g})
 selected_genres = st.sidebar.multiselect("Filter by Genre", all_genres)
-
-years = sorted(movies['year'].dropna().unique())
+years = sorted(y for y in movies["year"].dropna().unique())
 selected_year = st.sidebar.selectbox("Filter by Year", ["Any"] + [str(int(y)) for y in years])
 
-
-# ---- Watchlist Sidebar ----
 st.sidebar.subheader("🎒 Your Watchlist")
 if not watchlist:
     st.sidebar.write("No movies added yet.")
@@ -280,246 +258,76 @@ else:
     for mv in watchlist:
         st.sidebar.write(f"🎞 {mv['title']} ({mv['year']}) ⭐ {mv['rating']}")
 
-
-# ---- Similarity Matrix ----
-@st.cache_resource
-def build_similarity(df: pd.DataFrame) -> np.ndarray:
-    """Build similarity matrix from movie tags"""
-    cv = CountVectorizer(max_features=5000, stop_words='english')
-    vectors = cv.fit_transform(df['tags'])
-    # Convert sparse matrix to dense array directly
-    return cosine_similarity(vectors)
-
-# Initialize similarity matrix
-similarity = build_similarity(movies)
-
-@st.cache_data(show_spinner=False)
-def fetch_poster(movie_id: int) -> str:
-    """Fetch movie poster from TMDB API"""
-    session = create_requests_session()
-    url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}"
-    try:
-        response = session.get(url, timeout=(3, 10))
-        response.raise_for_status()
-        data = response.json()
-        if data.get("poster_path"):
-            poster_url = "https://image.tmdb.org/t/p/w185" + data["poster_path"]
-            # Verify if the poster image is actually accessible
-            img_response = session.get(poster_url, timeout=(3, 10))
-            img_response.raise_for_status()
-            return poster_url
-        logging.warning(f"No poster path found for movie ID {movie_id}")
-    except requests.RequestException as e:
-        logging.warning(f"Could not fetch poster for movie ID {movie_id}: {str(e)}")
-    except Exception as e:
-        logging.warning(f"Unexpected error fetching poster for movie ID {movie_id}: {str(e)}")
-    return "https://via.placeholder.com/185x278.png?text=Movie+Poster+Not+Available"
-
-@st.cache_data(show_spinner=False)
-def fetch_trailer(movie_id: int) -> Optional[str]:
-    """Fetch movie trailer from TMDB API"""
-    session = create_requests_session()
-    url = f"https://api.themoviedb.org/3/movie/{movie_id}/videos?api_key={TMDB_API_KEY}"
-    try:
-        response = session.get(url, timeout=(3, 10))
-        response.raise_for_status()
-        data = response.json()
-        
-        # First try to find official trailer
-        for video in data.get("results", []):
-            if (video.get("site") == "YouTube" and 
-                video.get("type") == "Trailer" and 
-                video.get("official", True)):
-                return f"https://www.youtube.com/watch?v={video['key']}"
-        
-        # If no official trailer, try any trailer
-        for video in data.get("results", []):
-            if video.get("site") == "YouTube" and video.get("type") == "Trailer":
-                return f"https://www.youtube.com/watch?v={video['key']}"
-                
-        # If no trailer, try any teaser
-        for video in data.get("results", []):
-            if video.get("site") == "YouTube" and video.get("type") == "Teaser":
-                return f"https://www.youtube.com/watch?v={video['key']}"
-        
-        logging.info(f"No trailer found for movie ID {movie_id}")
-    except requests.RequestException as e:
-        logging.warning(f"Could not fetch trailer for movie ID {movie_id}: {str(e)}")
-    except Exception as e:
-        logging.warning(f"Unexpected error fetching trailer for movie ID {movie_id}: {str(e)}")
-    return None
-
-def recommend(movie: str, genres: Optional[List[str]] = None, year: Optional[str] = None, k: int = 3) -> Tuple[List[str], List[str], List[str], List[float], List[int], List[Optional[str]]]:
-    """Get movie recommendations based on title, genres, and year"""
-    title = movie.strip().lower()
-    if title not in movies['title_lc'].values:
-        return [], [], [], [], [], []
-
-    # Find movie index and get similarity scores
-    idx = movies.index[movies['title_lc'] == title][0]
-    scores = similarity[idx]
-    ranked = sorted(list(enumerate(scores)), key=lambda x: x[1], reverse=True)[1:50]
-
-    final = []
-    for j, _ in ranked:
-        row = movies.iloc[j]
-        # Apply filters
-        if genres and not any(g in row['genre'].split('|') for g in genres):
-            continue
-        if year and year != "Any":
-            try:
-                if row['year'] != int(year):
-                    continue
-            except (ValueError, TypeError):
-                continue
-        final.append(row)
-        if len(final) >= k:
-            break
-
-    if not final:
-        return [], [], [], [], [], []
-    
-    # Extract required information
-    titles = [r.title for r in final]
-    posters = [fetch_poster(r.id) for r in final]
-    tags = [r.tags for r in final]
-    ratings = [float(r.vote_average) if pd.notnull(r.vote_average) else 0.0 for r in final]
-    years_ = [int(r.year) if pd.notnull(r.year) else 0 for r in final]
-    trailers = [fetch_trailer(r.id) for r in final]
-    
-    return titles, posters, tags, ratings, years_, trailers
-
-    titles = [r.title for r in final]
-    posters = [fetch_poster(r.id) for r in final]
-    tags = [r.tags for r in final]
-    ratings = [r.vote_average for r in final]
-    years_ = [r.year for r in final]
-    trailers = [fetch_trailer(r.id) for r in final]
-    return titles, posters, tags, ratings, years_, trailers
-
-
-# ---- Card Styling Based on Theme ----
-if theme == "🌙 Dark":
-    card_style = """
-        padding: 1rem;
-        border-radius: 8px;
-        background-color: #2D2D2D;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-        margin-bottom: 1rem;
-    """
-    button_style = """
-        background-color: #4A4A4A;
-        color: white;
-        border: 1px solid #666666;
-        border-radius: 5px;
-        padding: 0.5rem 1rem;
-        margin: 0.5rem 0;
-    """
-else:
-    card_style = """
-        padding: 1rem;
-        border-radius: 8px;
-        background-color: white;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        margin-bottom: 1rem;
-    """
-    button_style = """
-        background-color: #F0F2F6;
-        color: black;
-        border: 1px solid #E0E0E0;
-        border-radius: 5px;
-        padding: 0.5rem 1rem;
-        margin: 0.5rem 0;
-    """
-
-# ---- UI ----
+# ---------- Trending ----------
 st.subheader("🔥 Trending This Week")
-trending_movies = fetch_trending_movies()
-
-if trending_movies:
-    cols = st.columns(len(trending_movies))
-    for i, movie in enumerate(trending_movies):
+trending = fetch_trending_movies()
+if trending:
+    cols = st.columns(len(trending))
+    for i, m in enumerate(trending):
         with cols[i]:
-            # Apply card styling
-            st.markdown(f"""
-                <div style='{card_style}'>
-                    <div style='text-align: center;'>
-                        <img src='{movie["poster"]}' style='max-width: 100%; border-radius: 4px;'>
-                        <h3 style='margin: 0.5rem 0; font-size: 1.1rem;'>{movie['title']}</h3>
-                        <p style='margin: 0.2rem 0;'>📅 {movie['year']}</p>
-                        <p style='margin: 0.2rem 0;'>⭐ {movie['rating']:.1f}</p>
-                    </div>
+            st.markdown(
+                f"""
+                <div class="mm-card" style="text-align:center">
+                    <img src="{m['poster']}" style="width:100%; border-radius:8px;">
+                    <h3 style="margin:.6rem 0">{m['title']}</h3>
+                    <p style="margin:.2rem 0">📅 {m['year'] or '—'}</p>
+                    <p style="margin:.2rem 0">⭐ {m['rating']:.1f}</p>
                 </div>
-            """, unsafe_allow_html=True)
-            
-            # Add to watchlist button
-            if st.button("➕ Add to Watchlist", key=f"trending_add_{movie['title']}"):
-                    movie_info = {
-                        "title": movie['title'],
-                        "year": movie['year'],
-                        "rating": movie['rating'],
-                        "poster": movie['poster']
-                    }
-                    if movie_info not in watchlist:
-                        watchlist.append(movie_info)
-                        st.success("Added to Watchlist ✅")
-                    else:
-                        st.info("Already in Watchlist 📝")
-                
-            # If there's a trailer, add a trailer button
-            if "trailer" in movie and movie["trailer"]:
-                st.markdown(f"[🎬 Watch Trailer]({movie['trailer']})")
+                """,
+                unsafe_allow_html=True,
+            )
+            if st.button("➕ Add to Watchlist", key=f"trend_add_{m['id']}_{i}"):
+                item = {"title": m["title"], "year": m["year"], "rating": m["rating"], "poster": m["poster"]}
+                if item not in watchlist:
+                    watchlist.append(item); st.success("Added ✅")
+                else:
+                    st.info("Already added 📝")
+            if m.get("trailer"):
+                st.markdown(f"[🎬 Watch Trailer]({m['trailer']})")
 
-movie_name = st.text_input("Search a movie")
-
-if st.button("🔍 Find Recommendations", key="find_recommendations"):
-    titles, posters, tags, ratings, years_, trailers = recommend(movie_name, selected_genres, selected_year)
+# ---------- Search + Recommendations ----------
+movie_name = st.text_input("🔎 Search a movie you liked")
+if st.button("Find Recommendations"):
+    titles, posters, tags, ratings, years_, trailers, ids = recommend(
+        movie_name, selected_genres, selected_year, k=3
+    )
     if not titles:
-        st.error("🔍 No recommendations found. Please try another movie title.")
+        st.error("No recommendations found. Try another title.")
     else:
-        st.subheader("🎬 You may also like:")
-        
-        # Create columns for recommendations
+        st.subheader("🎬 You may also like")
         cols = st.columns(len(titles))
         for i in range(len(titles)):
             with cols[i]:
-                # Apply card styling
-                st.markdown(f"""
-                    <div style='{card_style}'>
-                        <div style='text-align: center;'>
-                            <img src='{posters[i]}' style='max-width: 100%; border-radius: 4px;'>
-                            <h3 style='margin: 0.5rem 0; font-size: 1.1rem;'>{titles[i]}</h3>
-                            <p style='margin: 0.2rem 0;'>📅 {years_[i]}</p>
-                            <p style='margin: 0.2rem 0;'>⭐ {ratings[i]:.1f}</p>
-                        </div>
+                st.markdown(
+                    f"""
+                    <div class="mm-card" style="text-align:center">
+                        <img src="{posters[i]}" style="width:100%; border-radius:8px;">
+                        <h3 style="margin:.6rem 0">{titles[i]}</h3>
+                        <p style="margin:.2rem 0">📅 {years_[i]}</p>
+                        <p style="margin:.2rem 0">⭐ {ratings[i]:.1f}</p>
                     </div>
-                """, unsafe_allow_html=True)
-                
-                # Buttons container
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    if st.button("➕ Watchlist", key=f"add_{titles[i]}_{i}"):
-                        movie_info = {
+                    """,
+                    unsafe_allow_html=True,
+                )
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("➕ Watchlist", key=f"rec_add_{ids[i]}_{i}"):
+                        item = {
                             "title": titles[i],
                             "year": years_[i],
                             "rating": ratings[i],
                             "poster": posters[i],
-                            "tags": tags[i]
+                            "tags": tags[i],
                         }
-                        if movie_info not in watchlist:
-                            watchlist.append(movie_info)
-                            st.success("Added to Watchlist ✅")
+                        if item not in watchlist:
+                            watchlist.append(item); st.success("Added ✅")
                         else:
-                            st.info("Already in Watchlist 📝")
-                    
-                    # Display trailer button if available
+                            st.info("Already added 📝")
+                with c2:
                     if trailers[i]:
-                        st.markdown(f"[![🎬]('https://img.shields.io/badge/Watch-Trailer-red')]({trailers[i]})")
-                    
-                    # Display movie tags/genres in a compact way
-                    if tags[i]:
-                        genre_list = [tag.strip() for tag in tags[i].split('|')[:3]]
-                        st.markdown(f"*{' • '.join(genre_list)}*", help=tags[i])
+                        st.markdown(f"[🎬 Trailer]({trailers[i]})")
 
-
-st.markdown("<footer><p>Made with ❤️ by Divyansh_S</p></footer>", unsafe_allow_html=True)
+# ---------- Footer ----------
+st.markdown("<hr>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center; opacity:.7'>Made with ❤️ by Divyansh_S</p>", unsafe_allow_html=True)
+# ---------- End of File ----------
