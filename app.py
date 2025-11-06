@@ -54,7 +54,7 @@ try:
     st.title("🎬 MovieMate – AI Movie Recommender")
     
     # Create the login form in the main area
-    name, authentication_status, username = authenticator.login('Login', 'main')
+    name, authentication_status, username = authenticator.login(form_name='Login', location='main')
     
     # Handle authentication status
     if authentication_status is False:
@@ -67,9 +67,8 @@ try:
         # Show success message in sidebar
         st.sidebar.success(f"✅ Logged in as {name}")
 
-        # Add logout button to sidebar (use explicit location kwarg)
-        # Do not pass unsupported kwargs to logout
-        authenticator.logout('Logout', location='sidebar')
+        # Add logout button to sidebar
+        authenticator.logout(button_name='Logout', location='sidebar')
 
         # Initialize user-specific session state
         WATCHLIST_KEY = f"watchlist_{username}"
